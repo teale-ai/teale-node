@@ -3,7 +3,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub relay: RelayConfig,
-    /// Inference backend: "llama" (default) or "mnn"
+    /// Inference backend: "llama" (default), "mnn", "litert", or "mesh"
     #[serde(default = "default_backend")]
     pub backend: String,
     /// llama-server config (required when backend = "llama")
@@ -12,6 +12,8 @@ pub struct Config {
     pub mnn: Option<MnnConfig>,
     /// LiteRT-LM config (required when backend = "litert")
     pub litert: Option<LiteRtConfig>,
+    /// Mesh-LLM config (required when backend = "mesh")
+    pub mesh: Option<MeshConfig>,
     pub node: NodeConfig,
 }
 
@@ -76,6 +78,31 @@ pub struct LiteRtConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MeshConfig {
+    /// Path to `mesh-llm` binary. Omit to attach to an externally-managed
+    /// mesh-llm instance (teale-node will not spawn or supervise it).
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// Full base URL of the mesh-llm OpenAI-compatible server, e.g.
+    /// "http://127.0.0.1:9337". Overrides `port` when set. Omit to use
+    /// 127.0.0.1:{port}.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Port for the mesh-llm OpenAI API (default 9337, its upstream default).
+    #[serde(default = "default_mesh_port")]
+    pub port: u16,
+    /// Model identifier reported to the network. If omitted, teale-node
+    /// queries /v1/models after the server becomes ready and uses the first
+    /// entry.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Extra arguments appended to `mesh-llm serve` when teale-node spawns
+    /// the subprocess, e.g. ["--auto"] or ["--model", "<hf-repo>"].
+    #[serde(default)]
+    pub serve_args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct NodeConfig {
     pub display_name: String,
     #[serde(default)]
@@ -116,6 +143,10 @@ fn default_litert_context_size() -> u32 {
     4096
 }
 
+fn default_mesh_port() -> u16 {
+    9337
+}
+
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -139,8 +170,13 @@ impl Config {
                     anyhow::bail!("[litert] config section is required when backend = \"litert\"");
                 }
             }
+            "mesh" => {
+                if config.mesh.is_none() {
+                    anyhow::bail!("[mesh] config section is required when backend = \"mesh\"");
+                }
+            }
             other => {
-                anyhow::bail!("Unknown backend '{}'. Supported: \"llama\", \"mnn\", \"litert\"", other);
+                anyhow::bail!("Unknown backend '{}'. Supported: \"llama\", \"mnn\", \"litert\", \"mesh\"", other);
             }
         }
 

@@ -15,7 +15,9 @@ use crate::backend::Backend;
 use crate::config::Config;
 use crate::hardware::{build_capabilities, detect_hardware};
 use crate::identity::NodeIdentity;
-use crate::inference::{spawn_llama_server, spawn_mnn_server, InferenceProxy};
+use crate::inference::{
+    fetch_first_model, spawn_llama_server, spawn_mesh_server, spawn_mnn_server, InferenceProxy,
+};
 use crate::relay::{IncomingRelayMessage, RelayClient};
 
 #[derive(Parser)]
@@ -96,6 +98,42 @@ async fn start_backend(config: &Config, args: &Args) -> anyhow::Result<(Backend,
             let engine = litert::LiteRtEngine::new(litert_config)?;
             let model_id = engine.loaded_models().into_iter().next().unwrap_or_default();
             Ok((Backend::LiteRt(engine), model_id))
+        }
+
+        "mesh" => {
+            let mesh = config.mesh.as_ref().unwrap();
+            let base_url = mesh
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| format!("http://127.0.0.1:{}", mesh.port));
+
+            let _child = match (&mesh.binary, args.no_backend) {
+                (Some(binary), false) => {
+                    let child = spawn_mesh_server(mesh, binary)?;
+                    info!("Waiting for mesh-llm to become ready at {}...", base_url);
+                    Some(child)
+                }
+                _ => {
+                    info!("Attaching to mesh-llm at {} (not spawning)", base_url);
+                    None
+                }
+            };
+
+            // Readiness probe first with a bootstrap proxy — mesh-llm has no
+            // `/health`, so we poll `/v1/models` instead. model_id isn't known
+            // yet at this point, hence the empty placeholder.
+            let bootstrap = InferenceProxy::with_base_url(&base_url, "", "/v1/models");
+            bootstrap.wait_for_health(120).await?;
+
+            let model_id = match mesh.model_id.clone() {
+                Some(id) => id,
+                None => fetch_first_model(&base_url).await?,
+            };
+            info!("mesh-llm serving model: {}", model_id);
+
+            let inference = InferenceProxy::with_base_url(&base_url, &model_id, "/v1/models");
+            std::mem::forget(_child);
+            Ok((Backend::Http(inference), model_id))
         }
 
         backend_name => {
